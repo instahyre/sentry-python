@@ -5,6 +5,7 @@ import io
 import urllib3  # type: ignore
 import certifi
 import gzip
+import re
 
 from datetime import datetime, timedelta
 
@@ -93,6 +94,55 @@ class HttpTransport(Transport):
 
     def _send_event(self, event):
         # type: (Dict[str, Any]) -> None
+
+        error_context_lines = []
+
+        # T7565: Collect error message information and skip if any of those
+        # messages correspond to messages in our blacklist. Re-implementation
+        # of custom code from the deprecated Raven library.
+        try:
+            exception = event['exception']
+            exc_vals = exception['values']
+
+            for exc_val in exc_vals:
+                frames = exc_val['stacktrace']['frames']
+
+                for frame in frames:
+                    error_context_lines.append(frame['context_line'])
+        except (IndexError, KeyError):
+            # The event structure is missing some data, so do nothing.
+            pass
+        else:
+            messages_to_ignore = [
+                u"KeyError: 'partial_pipeline'",
+                u"TypeError: argument of type 'NoneType' is not iterable",
+                u"NotFound: Invalid resource lookup data provided (mismatched"
+                    " type)",
+                u"Invalid resource lookup data provided (mismatched type)",
+                u"Forbidden (CSRF token missing or incorrect.)"
+            ]
+            regex_messages = [
+                r"PdfReadWarning.*", r"Superfluous whitespace.*",
+                r"SNIMissingWarning: An HTTPS request has.*",
+                r"An HTTPS request has.*",
+                r"InsecurePlatformWarning: A true SSLContext.*",
+                r"A true SSLContext is not available.*",
+                r"RuntimeWarning: DateTimeField.*",
+                r"DateTimeField.*received a naive datetime.*",
+                r"DeprecationWarning: integer argument expected.*"
+                r"integer argument expected, got float.*"
+            ]
+
+            for context_line in error_context_lines:
+                for msg in messages_to_ignore:
+                    if msg.lower() in context_line.lower() or \
+                            context_line.lower() in msg.lower():
+                        return
+
+                for re_msg in regex_messages:
+                    if re.match(re_msg, context_line):
+                        return
+
         if self._disabled_until is not None:
             if datetime.utcnow() < self._disabled_until:
                 return
